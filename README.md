@@ -1,4 +1,4 @@
-# SpecialAgent
+# CERBEROUS-MCP+
 
 **Connect AI to Unreal Engine 5**
 
@@ -6,11 +6,11 @@ Full Python API access • 71+ level design tools • Visual feedback loop
 
 ---
 
-## What is SpecialAgent?
+## What is CERBEROUS-MCP+?
 
-SpecialAgent bridges AI assistants and Unreal Engine 5 through the **Model Context Protocol (MCP)**. Connect Claude, GPT, or any MCP-compatible LLM directly to your editor and control it through natural language.
+CERBEROUS-MCP+ bridges AI assistants and Unreal Engine 5 through the **Model Context Protocol (MCP)**. Connect Claude, GPT, or any MCP-compatible LLM directly to your editor and control it through programmatic tools.
 
-At its core, SpecialAgent provides **unrestricted Python execution** with full access to UE5's Python API—meaning your AI assistant can do anything the editor can do. On top of that foundation, **71+ purpose-built tools** handle common level design tasks without writing a single line of code.
+At its core, CERBEROUS-MCP+ provides **unrestricted Python execution** with full access to UE5's Python API—meaning your AI assistant can do anything the editor can do. On top of that foundation, a curated set of tools enables common level-design and editor tasks.
 
 Native HTTP/SSE transport. No external bridges or dependencies.
 
@@ -74,14 +74,14 @@ Describe intent → Execute → Screenshot → AI analyzes → Iterate
    ```
    YourProject/
    └── Plugins/
-       └── SpecialAgent/
+       └── CERBEROUS-MCP+/
    ```
 
 2. **Regenerate project files** (right-click `.uproject` → Generate Visual Studio/Xcode project files)
 
 3. **Build and launch** your project
 
-4. **Enable the plugin** in Edit → Plugins → Search "SpecialAgent"
+4. **Enable the plugin** in Edit → Plugins → Search "CERBEROUS-MCP+"
 
 5. **Restart** the editor
 
@@ -94,7 +94,7 @@ Describe intent → Execute → Screenshot → AI analyzes → Iterate
 Once the editor launches, check the Output Log for:
 
 ```
-LogSpecialAgent: MCP Server started on port 8767
+LogCERBEROUSMCPPLUS: MCP Server started on port 8767
 ```
 
 Or test with curl:
@@ -105,12 +105,12 @@ curl http://localhost:8767/health
 
 ### 2. Configure Your MCP Client
 
-Add SpecialAgent to your MCP client configuration:
+Add CERBEROUS-MCP+ to your MCP client configuration:
 
 ```json
 {
   "mcpServers": {
-    "SpecialAgent": {
+    "CERBEROUS-MCP+": {
       "url": "http://localhost:8767/sse",
       "transport": "sse"
     }
@@ -164,7 +164,7 @@ Your AI assistant now has access to:
 
 ## Configuration
 
-Edit `Config/DefaultSpecialAgent.ini` to customize:
+Edit `Config/DefaultSpecialAgent.ini` (or override via project/engine config) to customize:
 
 ```ini
 [/Script/SpecialAgent.SpecialAgentSettings]
@@ -178,6 +178,8 @@ bAutoStart=true
 bVerboseLogging=false
 ```
 
+> Note: The plugin also supports a parallel configuration section for CERBEROUS-MCP+ compatibility. Do NOT store secrets (API keys, tokens) in these files. Use environment variables or a local, gitignored config for sensitive values.
+
 ---
 
 ## Architecture
@@ -188,7 +190,7 @@ bVerboseLogging=false
 └──────────────┬──────────────────────────┘
                │ HTTP/SSE + JSON-RPC 2.0
 ┌──────────────▼──────────────────────────┐
-│       SpecialAgent MCP Server           │
+│       CERBEROUS-MCP+ MCP Server         │
 │                                         │
 │  ┌─────────────────────────────────┐    │
 │  │   Python Service (Primary)      │    │
@@ -222,16 +224,6 @@ bVerboseLogging=false
 
 ---
 
-## Design Philosophy
-
-The 71+ tools exist for convenience and discoverability. Python execution is the real power.
-
-When your AI assistant sees `world/place_in_circle`, it learns circular placement is possible. But for custom logic—density falloff, terrain-aware positioning, asset variation based on rules—it writes Python.
-
-Both layers work together: quick tools for common tasks, unlimited scripting for everything else.
-
----
-
 ## Troubleshooting
 
 ### Server Won't Start
@@ -251,10 +243,6 @@ Both layers work together: quick tools for common tasks, unlimited scripting for
 - Call `tools/list` to verify registration
 - Check for errors in Output Log
 - Restart the editor
-
-### Client not connecting
-
-- Some IDEs like Cursor may need to be started after your Unreal Engine editor as the connection attempt only occurs on startup.
 
 ---
 
