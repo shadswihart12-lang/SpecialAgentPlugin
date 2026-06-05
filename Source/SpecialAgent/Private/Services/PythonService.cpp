@@ -8,6 +8,7 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "MCPServer.h"
 
 FPythonService::FPythonService()
 {
@@ -26,7 +27,7 @@ TArray<FMCPToolInfo> FPythonService::GetAvailableTools() const
 	{
 		FMCPToolInfo Tool;
 		Tool.Name = TEXT("execute");
-		Tool.Description = TEXT("Execute Python with full UE5 API. Use for: spawning actors (unreal.EditorLevelLibrary), modifying properties, batch operations, anything not covered by other tools. Import 'unreal' module is automatic.");
+		Tool.Description = TEXT("Execute Python with full UE5 API. Use for: spawning actors (unreal.EditorLevelLibrary), modifying properties, batch operations, anything not covered by other tools.");
 		
 		TSharedPtr<FJsonObject> CodeParam = MakeShared<FJsonObject>();
 		CodeParam->SetStringField(TEXT("type"), TEXT("string"));
@@ -173,11 +174,11 @@ FMCPResponse FPythonService::HandleExecute(const FMCPRequest& Request)
 				JsonObject->TryGetStringField(TEXT("stderr"), StdErr);
 				JsonObject->TryGetBoolField(TEXT("success"), bSuccess);
 				
-				UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Successfully retrieved output from temp file"));
+				UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Successfully retrieved output from temp file"));
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("SpecialAgent: Failed to parse JSON from temp file: %s"), *JsonString);
+				UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: Failed to parse JSON from temp file: %s"), *JsonString);
 				StdErr = TEXT("Failed to parse execution result");
 				bSuccess = false;
 			}
@@ -187,7 +188,7 @@ FMCPResponse FPythonService::HandleExecute(const FMCPRequest& Request)
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("SpecialAgent: Failed to read temp file: %s"), *TempFile);
+			UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: Failed to read temp file: %s"), *TempFile);
 			StdErr = TEXT("Failed to read execution result");
 			bSuccess = false;
 		}
@@ -202,12 +203,12 @@ FMCPResponse FPythonService::HandleExecute(const FMCPRequest& Request)
 
 		if (!bSuccess)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("SpecialAgent: Python execution failed in %.3f seconds: %s"), 
+			UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: Python execution failed in %.3f seconds: %s"), 
 				ExecutionTime, *StdErr);
 		}
 		else
 		{
-			UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Python execution succeeded in %.3f seconds"), ExecutionTime);
+			UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Python execution succeeded in %.3f seconds"), ExecutionTime);
 		}
 
 		return Result;
@@ -233,9 +234,31 @@ FMCPResponse FPythonService::HandleExecuteFile(const FMCPRequest& Request)
 		return InvalidParams(Request.Id, TEXT("Missing required parameter 'file_path'"));
 	}
 
+	// Resolve file path: if relative, treat as relative to Content/Python
+	FString ResolvedPath = FilePath;
+	if (!FPaths::IsRelative(FilePath))
+	{
+		ResolvedPath = FilePath;
+	}
+	else
+	{
+		ResolvedPath = FPaths::Combine(FPaths::ProjectContentDir(), TEXT("Python"), FilePath);
+	}
+
+	// Validate path against filesystem sandbox
+	FString Canonical;
+	if (!FSpecialAgentMCPServer::IsPathSafe(ResolvedPath, &Canonical))
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("stderr"), FString::Printf(TEXT("Access to file is denied or path is outside allowed directories: %s"), *FilePath));
+		UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: Blocked attempt to read unsafe file path: %s"), *ResolvedPath);
+		return FMCPResponse::Success(Request.Id, Result);
+	}
+
 	// Read file content
 	FString FileContent;
-	if (!FFileHelper::LoadFileToString(FileContent, *FilePath))
+	if (!FFileHelper::LoadFileToString(FileContent, *Canonical))
 	{
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("success"), false);
@@ -244,7 +267,7 @@ FMCPResponse FPythonService::HandleExecuteFile(const FMCPRequest& Request)
 	}
 
 	// Execute the file content as Python code
-	auto ExecuteTask = [FileContent, FilePath]() -> TSharedPtr<FJsonObject>
+	auto ExecuteTask = [FileContent, Canonical]() -> TSharedPtr<FJsonObject>
 	{
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 
@@ -271,10 +294,10 @@ FMCPResponse FPythonService::HandleExecuteFile(const FMCPRequest& Request)
 		Result->SetStringField(TEXT("stdout"), PythonCommand.CommandResult);
 		Result->SetStringField(TEXT("stderr"), bSuccess ? TEXT("") : PythonCommand.CommandResult);
 		Result->SetNumberField(TEXT("execution_time"), ExecutionTime);
-		Result->SetStringField(TEXT("file_path"), FilePath);
+		Result->SetStringField(TEXT("file_path"), Canonical);
 
-		UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Python file execution %s in %.3f seconds: %s"), 
-			bSuccess ? TEXT("succeeded") : TEXT("failed"), ExecutionTime, *FilePath);
+		UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Python file execution %s in %.3f seconds: %s"), 
+			bSuccess ? TEXT("succeeded") : TEXT("failed"), ExecutionTime, *Canonical);
 
 		return Result;
 	};
@@ -344,4 +367,3 @@ FMCPResponse FPythonService::HandleListModules(const FMCPRequest& Request)
 
 	return FMCPResponse::Success(Request.Id, Result);
 }
-
