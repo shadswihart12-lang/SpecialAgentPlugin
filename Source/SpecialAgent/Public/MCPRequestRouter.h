@@ -66,5 +66,12 @@ private:
 
 	/** Registered services */
 	TMap<FString, TSharedPtr<IMCPService>> Services;
-};
 
+	/** Cached stable responses to avoid rebuilding JSON DOM on every request */
+	TSharedPtr<FJsonObject> CachedInitializeResult;
+	TSharedPtr<FJsonObject> CachedServerInfoResult;
+	bool bCachedResponsesReady = false;
+
+	/** Build cached responses (called at construction) */
+	void InitializeCachedResponses();
+};
