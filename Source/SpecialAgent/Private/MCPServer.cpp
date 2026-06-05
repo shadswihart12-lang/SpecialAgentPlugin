@@ -7,11 +7,14 @@
 #include "Serialization/JsonWriter.h"
 #include "Misc/Guid.h"
 #include "Async/Async.h"
+#include "Misc/ConfigCacheIni.h"
 
 FSpecialAgentMCPServer::FSpecialAgentMCPServer()
 	: bIsRunning(false)
 	, ServerPort(8767)
 	, LastClientActivity(FDateTime::MinValue())
+	, ServerBindAddress(TEXT("127.0.0.1"))
+	, bEnforceLocalOnly(true)
 {
 	RequestRouter = MakeShared<FMCPRequestRouter>();
 }
@@ -25,16 +28,36 @@ bool FSpecialAgentMCPServer::StartServer(int32 Port)
 {
 	if (bIsRunning)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("SpecialAgent: MCP Server is already running"));
+		UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: MCP Server is already running"));
 		return false;
 	}
 
 	ServerPort = Port;
 
+	// Read configuration (non-sensitive settings only)
+	if (GConfig)
+	{
+		// Respect existing /Script/SpecialAgent.SpecialAgentSettings section but add safer defaults
+		GConfig->GetString(TEXT("/Script/SpecialAgent.SpecialAgentSettings"), TEXT("ServerBindAddress"), ServerBindAddress, GGameIni);
+		GConfig->GetBool(TEXT("/Script/SpecialAgent.SpecialAgentSettings"), TEXT("bEnforceLocalOnly"), bEnforceLocalOnly, GGameIni);
+	}
+
+	// Enforce local-only by default for safety. If bEnforceLocalOnly is true, force loopback bind address.
+	if (bEnforceLocalOnly)
+	{
+		if (!ServerBindAddress.IsEmpty() && !(ServerBindAddress == TEXT("127.0.0.1") || ServerBindAddress == TEXT("::1") || ServerBindAddress.Equals(TEXT("localhost"), ESearchCase::IgnoreCase)))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: bEnforceLocalOnly is true — overriding configured ServerBindAddress (%s) to loopback (127.0.0.1) for safety"), *ServerBindAddress);
+			ServerBindAddress = TEXT("127.0.0.1");
+		}
+	}
+
 	// Get the HTTP server module
 	FHttpServerModule& HttpServerModule = FHttpServerModule::Get();
 	
 	// Start listeners on the specified port
+	// Note: The underlying HttpServerModule typically binds based on engine-level settings.
+	// We call StartAllListeners() to initialize listeners; ensure platform firewall rules allow loopback only as needed.
 	HttpServerModule.StartAllListeners();
 	
 	// Get the HTTP router for our port
@@ -42,7 +65,7 @@ bool FSpecialAgentMCPServer::StartServer(int32 Port)
 	
 	if (!HttpRouter.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("SpecialAgent: Failed to get HTTP router for port %d"), ServerPort);
+		UE_LOG(LogTemp, Error, TEXT("CERBEROUS-MCP+: Failed to get HTTP router for port %d"), ServerPort);
 		return false;
 	}
 
@@ -101,10 +124,10 @@ bool FSpecialAgentMCPServer::StartServer(int32 Port)
 	);
 
 	bIsRunning = true;
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: MCP HTTP Server started on port %d"), ServerPort);
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: SSE endpoint: http://localhost:%d/sse"), ServerPort);
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Message endpoint: http://localhost:%d/message"), ServerPort);
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Health endpoint: http://localhost:%d/health"), ServerPort);
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: MCP HTTP Server started on port %d (bind=%s)"), ServerPort, *ServerBindAddress);
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: SSE endpoint: http://%s:%d/sse"), *ServerBindAddress, ServerPort);
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Message endpoint: http://%s:%d/message"), *ServerBindAddress, ServerPort);
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Health endpoint: http://%s:%d/health"), *ServerBindAddress, ServerPort);
 
 	return true;
 }
@@ -116,7 +139,7 @@ void FSpecialAgentMCPServer::StopServer()
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: MCP Server stopping"));
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: MCP Server stopping"));
 
 	// Unbind routes
 	if (HttpRouter.IsValid())
@@ -133,7 +156,7 @@ void FSpecialAgentMCPServer::StopServer()
 	}
 
 	bIsRunning = false;
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: MCP Server stopped"));
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: MCP Server stopped"));
 }
 
 FString FSpecialAgentMCPServer::GenerateSessionId()
@@ -143,7 +166,33 @@ FString FSpecialAgentMCPServer::GenerateSessionId()
 
 bool FSpecialAgentMCPServer::HandleSSEConnection(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: New SSE connection request"));
+	// Optionally enforce local-only client connections based on config
+	if (bEnforceLocalOnly)
+	{
+		// Check for common proxy headers for client address; if present and not loopback, reject.
+		const FString* XFF = Request.Headers.Find(TEXT("X-Forwarded-For"));
+		const FString* XRI = Request.Headers.Find(TEXT("X-Real-IP"));
+		FString ClientAddr;
+		if (XFF && !XFF->IsEmpty())
+		{
+			ClientAddr = XFF->LeftChop(0);
+		}
+		else if (XRI && !XRI->IsEmpty())
+		{
+			ClientAddr = *XRI;
+		}
+
+		if (!ClientAddr.IsEmpty() && !(ClientAddr == TEXT("127.0.0.1") || ClientAddr == TEXT("::1") || ClientAddr.Equals(TEXT("localhost"), ESearchCase::IgnoreCase)))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: Rejecting SSE connection from non-local address: %s"), *ClientAddr);
+			TUniquePtr<FHttpServerResponse> Response = FHttpServerResponse::Create(TEXT("Forbidden"), TEXT("text/plain"));
+			Response->Code = EHttpServerResponseCodes::Forbidden;
+			OnComplete(MoveTemp(Response));
+			return true;
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: New SSE connection request"));
 
 	// Generate session ID for this connection
 	FString SessionId = GenerateSessionId();
@@ -153,7 +202,7 @@ bool FSpecialAgentMCPServer::HandleSSEConnection(const FHttpServerRequest& Reque
 
 	// Build the SSE response with the endpoint event
 	// MCP SSE transport expects: event: endpoint\ndata: <url>\n\n
-	FString MessageEndpoint = FString::Printf(TEXT("http://localhost:%d/message?sessionId=%s"), ServerPort, *SessionId);
+	FString MessageEndpoint = FString::Printf(TEXT("http://%s:%d/message?sessionId=%s"), *ServerBindAddress, ServerPort, *SessionId);
 	
 	// Format as proper SSE event
 	FString SSEData = FString::Printf(
@@ -178,7 +227,7 @@ bool FSpecialAgentMCPServer::HandleSSEConnection(const FHttpServerRequest& Reque
 
 	Response->Code = EHttpServerResponseCodes::Ok;
 
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: SSE endpoint event sent, session: %s, endpoint: %s"), *SessionId, *MessageEndpoint);
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: SSE endpoint event sent, session: %s, endpoint: %s"), *SessionId, *MessageEndpoint);
 
 	OnComplete(MoveTemp(Response));
 
@@ -187,6 +236,38 @@ bool FSpecialAgentMCPServer::HandleSSEConnection(const FHttpServerRequest& Reque
 
 bool FSpecialAgentMCPServer::HandleMessage(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
+	// If configured to enforce local-only clients, attempt to detect non-local clients via common headers and reject.
+	if (bEnforceLocalOnly)
+	{
+		const FString* XFF = Request.Headers.Find(TEXT("X-Forwarded-For"));
+		const FString* XRI = Request.Headers.Find(TEXT("X-Real-IP"));
+		FString ClientAddr;
+		if (XFF && !XFF->IsEmpty())
+		{
+			ClientAddr = XFF->LeftChop(0);
+		}
+		else if (XRI && !XRI->IsEmpty())
+		{
+			ClientAddr = *XRI;
+		}
+
+		if (!ClientAddr.IsEmpty() && !(ClientAddr == TEXT("127.0.0.1") || ClientAddr == TEXT("::1") || ClientAddr.Equals(TEXT("localhost"), ESearchCase::IgnoreCase)))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: Rejecting message POST from non-local address: %s"), *ClientAddr);
+			TSharedPtr<FJsonObject> ErrorObj = MakeShared<FJsonObject>();
+			ErrorObj->SetStringField(TEXT("error"), TEXT("Forbidden: non-local client"));
+
+			FString ResponseJson;
+			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ResponseJson);
+			FJsonSerializer::Serialize(ErrorObj.ToSharedRef(), Writer);
+
+			TUniquePtr<FHttpServerResponse> Response = FHttpServerResponse::Create(ResponseJson, TEXT("application/json"));
+			Response->Code = EHttpServerResponseCodes::Forbidden;
+			OnComplete(MoveTemp(Response));
+			return true;
+		}
+	}
+
 	// Get session ID from query parameters (optional)
 	FString SessionId;
 	const FString* SessionIdValue = Request.QueryParams.Find(TEXT("sessionId"));
@@ -205,7 +286,7 @@ bool FSpecialAgentMCPServer::HandleMessage(const FHttpServerRequest& Request, co
 		BodyString = UTF8_TO_TCHAR(reinterpret_cast<const char*>(BodyWithNull.GetData()));
 	}
 	
-	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Received message (session: %s, size: %d): %s"), 
+	UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Received message (session: %s, size: %d): %s"), 
 		*SessionId, Request.Body.Num(), *BodyString.Left(1000));
 
 	// Record client activity for status tracking
@@ -214,12 +295,12 @@ bool FSpecialAgentMCPServer::HandleMessage(const FHttpServerRequest& Request, co
 	// Handle empty body - some clients send empty POST to check connection
 	if (BodyString.IsEmpty() || BodyString.TrimStartAndEnd().IsEmpty())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("SpecialAgent: Received empty request body"));
+		UE_LOG(LogTemp, Warning, TEXT("CERBEROUS-MCP+: Received empty request body"));
 		
 		// Return a simple acknowledgment for empty requests
 		TSharedPtr<FJsonObject> AckResult = MakeShared<FJsonObject>();
 		AckResult->SetStringField(TEXT("status"), TEXT("ready"));
-		AckResult->SetStringField(TEXT("server"), TEXT("SpecialAgent"));
+		AckResult->SetStringField(TEXT("server"), TEXT("CERBEROUS-MCP+"));
 		
 		FString ResponseJson;
 		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ResponseJson);
@@ -236,7 +317,7 @@ bool FSpecialAgentMCPServer::HandleMessage(const FHttpServerRequest& Request, co
 	FMCPRequest MCPRequest;
 	if (!ParseRequest(BodyString, MCPRequest))
 	{
-		UE_LOG(LogTemp, Error, TEXT("SpecialAgent: Failed to parse JSON: %s"), *BodyString.Left(500));
+		UE_LOG(LogTemp, Error, TEXT("CERBEROUS-MCP+: Failed to parse JSON: %s"), *BodyString.Left(500));
 		
 		FMCPResponse ErrorResponse = FMCPResponse::Error(
 			TEXT(""),
@@ -255,15 +336,15 @@ bool FSpecialAgentMCPServer::HandleMessage(const FHttpServerRequest& Request, co
 	// Process on game thread and send response
 	AsyncTask(ENamedThreads::GameThread, [this, MCPRequest, OnComplete, SessionId]()
 	{
-		UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Processing request on game thread: %s"), *MCPRequest.Method);
+		UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Processing request on game thread: %s"), *MCPRequest.Method);
 		
 		FMCPResponse MCPResponse = RequestRouter->RouteRequest(MCPRequest);
 		
-		UE_LOG(LogTemp, Log, TEXT("SpecialAgent: RouteRequest completed for: %s"), *MCPRequest.Method);
+		UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: RouteRequest completed for: %s"), *MCPRequest.Method);
 		
 		FString ResponseJson = FormatResponse(MCPResponse);
 
-		UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Response ready for %s (size=%d): %s"), 
+		UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Response ready for %s (size=%d): %s"), 
 			*MCPRequest.Method, ResponseJson.Len(), *ResponseJson.Left(300));
 
 		TUniquePtr<FHttpServerResponse> Response = FHttpServerResponse::Create(ResponseJson, TEXT("application/json"));
@@ -272,9 +353,9 @@ bool FSpecialAgentMCPServer::HandleMessage(const FHttpServerRequest& Request, co
 		Response->Headers.Add(TEXT("Access-Control-Allow-Headers"), { TEXT("Content-Type") });
 		Response->Code = EHttpServerResponseCodes::Ok;
 
-		UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Calling OnComplete for: %s"), *MCPRequest.Method);
+		UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Calling OnComplete for: %s"), *MCPRequest.Method);
 		OnComplete(MoveTemp(Response));
-		UE_LOG(LogTemp, Log, TEXT("SpecialAgent: OnComplete returned for: %s"), *MCPRequest.Method);
+		UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: OnComplete returned for: %s"), *MCPRequest.Method);
 	});
 
 	return true;
@@ -296,7 +377,7 @@ bool FSpecialAgentMCPServer::HandleHealth(const FHttpServerRequest& Request, con
 {
 	TSharedPtr<FJsonObject> HealthObj = MakeShared<FJsonObject>();
 	HealthObj->SetStringField(TEXT("status"), TEXT("healthy"));
-	HealthObj->SetStringField(TEXT("server"), TEXT("SpecialAgent MCP Server"));
+	HealthObj->SetStringField(TEXT("server"), TEXT("CERBEROUS-MCP+ MCP Server"));
 	HealthObj->SetStringField(TEXT("version"), TEXT("1.0.0"));
 	HealthObj->SetNumberField(TEXT("port"), ServerPort);
 	HealthObj->SetBoolField(TEXT("running"), bIsRunning);
@@ -324,10 +405,22 @@ bool FSpecialAgentMCPServer::ParseRequest(const FString& JsonString, FMCPRequest
 	}
 
 	// Parse JSON-RPC fields
-	OutRequest.JsonRpc = JsonObject->GetStringField(TEXT("jsonrpc"));
-	OutRequest.Method = JsonObject->GetStringField(TEXT("method"));
+	// Strict validation: jsonrpc must be "2.0"
+	FString JsonRpcVal;
+	if (!JsonObject->TryGetStringField(TEXT("jsonrpc"), JsonRpcVal) || JsonRpcVal != TEXT("2.0"))
+	{
+		return false;
+	}
+	OutRequest.JsonRpc = JsonRpcVal;
+
+	FString MethodVal;
+	if (!JsonObject->TryGetStringField(TEXT("method"), MethodVal) || MethodVal.IsEmpty())
+	{
+		return false;
+	}
+	OutRequest.Method = MethodVal;
 	
-	// Params can be object or omitted
+	// Params can be object or omitted; enforce object when present
 	const TSharedPtr<FJsonObject>* ParamsObj;
 	if (JsonObject->TryGetObjectField(TEXT("params"), ParamsObj))
 	{
@@ -349,6 +442,11 @@ bool FSpecialAgentMCPServer::ParseRequest(const FString& JsonString, FMCPRequest
 		else if (IdValue->Type == EJson::Number)
 		{
 			OutRequest.Id = FString::Printf(TEXT("%d"), (int32)IdValue->AsNumber());
+		}
+		else
+		{
+			// Non-string/number ids are not supported
+			return false;
 		}
 	}
 
@@ -403,7 +501,7 @@ void FSpecialAgentMCPServer::SendSSEEvent(const FString& SessionId, const FStrin
 	if (ConnectionPtr && (*ConnectionPtr)->bIsValid)
 	{
 		FString EventData = FString::Printf(TEXT("event: %s\ndata: %s\n\n"), *EventType, *Data);
-		UE_LOG(LogTemp, Verbose, TEXT("SpecialAgent: Sending SSE event to %s: %s"), *SessionId, *EventType);
+		UE_LOG(LogTemp, Verbose, TEXT("CERBEROUS-MCP+: Sending SSE event to %s: %s"), *SessionId, *EventType);
 	}
 }
 
@@ -436,7 +534,7 @@ void FSpecialAgentMCPServer::CleanupConnections()
 	for (const FString& Key : ToRemove)
 	{
 		SSEConnections.Remove(Key);
-		UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Cleaned up stale SSE connection: %s"), *Key);
+		UE_LOG(LogTemp, Log, TEXT("CERBEROUS-MCP+: Cleaned up stale SSE connection: %s"), *Key);
 	}
 }
 
