@@ -74,6 +74,14 @@ public:
 	 */
 	void RecordClientActivity();
 
+	/**
+	 * Check whether a filesystem path is allowed (canonicalized and within project/plugin directories)
+	 * @param InPath The input path to validate
+	 * @param OutCanonical Optional out canonical path
+	 * @return true if the canonical path is within allowed base directories
+	 */
+	static bool IsPathSafe(const FString& InPath, FString* OutCanonical = nullptr);
+
 private:
 	/** Handle SSE connection request (GET /sse) */
 	bool HandleSSEConnection(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
@@ -128,6 +136,12 @@ private:
 
 	/** Server port */
 	int32 ServerPort;
+
+	/** Server bind address (read from config) */
+	FString ServerBindAddress;
+
+	/** Enforce only local connections */
+	bool bEnforceLocalOnly;
 
 	/** Critical section for thread safety */
 	FCriticalSection ConnectionsLock;
